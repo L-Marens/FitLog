@@ -116,3 +116,123 @@ function Get-CalorieSummary {
         Write-Host "Over by:   $([math]::Abs($remaining))" -ForegroundColor Red
     }
 }
+
+# --- Log file location (records activity and errors) ---
+$LogFolder = Join-Path $PSScriptRoot 'logs'
+$LogFile   = Join-Path $LogFolder 'fitlog.log'
+
+if (-not (Test-Path $LogFolder)) {
+    New-Item -ItemType Directory -Path $LogFolder | Out-Null
+}
+
+# --- Function: Write-Log ---
+function Write-Log {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -Path $LogFile -Value "$stamp  $Message"
+}
+
+# --- Function: Remove-Entry ---
+function Remove-Entry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    try {
+        if (-not (Test-Path $MealFile)) {
+            throw "No log file found."
+        }
+
+        $all   = @(Import-Csv $MealFile)
+        $index = -1
+
+        # Search from the newest entry backwards for a matching name
+        for ($i = $all.Count - 1; $i -ge 0; $i--) {
+            if ($all[$i].Name -eq $Name) {
+                $index = $i
+                break
+            }
+        }
+
+        if ($index -eq -1) {
+            throw "No entry named '$Name' was found."
+        }
+
+        # Keep every entry except the one we are removing
+        $keep = @(for ($i = 0; $i -lt $all.Count; $i++) {
+            if ($i -ne $index) { $all[$i] }
+        })
+
+        if ($keep.Count -eq 0) {
+            Remove-Item $MealFile
+        }
+        else {
+            $keep | Export-Csv -Path $MealFile -NoTypeInformation
+        }
+
+        Write-Host "Removed: $Name" -ForegroundColor Green
+        Write-Log "Removed entry: $Name"
+    }
+    catch {
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "ERROR in Remove-Entry: $($_.Exception.Message)"
+    }
+}
+
+# --- Function: Export-WeeklyReport ---
+function Export-WeeklyReport {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 60)]
+        [int]$Days = 7
+    )
+
+    try {
+        if (-not (Test-Path $MealFile)) {
+            throw "No log file found."
+        }
+
+        # Only keep meals from the last $Days days (including today)
+        $cutoff = (Get-Date).AddDays(-($Days - 1)).Date
+        $meals  = Import-Csv $MealFile | Where-Object { [datetime]$_.Date -ge $cutoff }
+
+        if (-not $meals) {
+            throw "No meals found in the last $Days days."
+        }
+
+        # Group by date and total each day
+        $report = $meals | Group-Object Date | Sort-Object Name | ForEach-Object {
+            [PSCustomObject]@{
+                Date          = $_.Name
+                Meals         = $_.Count
+                TotalCalories = ($_.Group | Measure-Object -Property Calories -Sum).Sum
+            }
+        }
+
+        $average = [math]::Round(($report | Measure-Object -Property TotalCalories -Average).Average)
+
+        # Save the report as a CSV in data\reports
+        $reportFolder = Join-Path $DataFolder 'reports'
+        if (-not (Test-Path $reportFolder)) {
+            New-Item -ItemType Directory -Path $reportFolder | Out-Null
+        }
+        $reportFile = Join-Path $reportFolder ("weekly-report-{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd'))
+        $report | Export-Csv -Path $reportFile -NoTypeInformation
+
+        $report | Format-Table -AutoSize
+        Write-Host "Average per logged day: $average calories"
+        Write-Host "Report saved to: $reportFile" -ForegroundColor Green
+        Write-Log "Weekly report exported to $reportFile"
+    }
+    catch {
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "ERROR in Export-WeeklyReport: $($_.Exception.Message)"
+    }
+}
